@@ -1,12 +1,14 @@
 ﻿#include <Windows.h>
+#include <winuser.h>  
 #include <process.h>
 #include <string>
 #include <vector>
 #include <mmsystem.h>
-#include <opencv.hpp>
+#include <opencv2/opencv.hpp>
 #include <fstream>
 #include <iomanip>
-
+#include <shellapi.h>  
+#pragma comment(lib, "shell32.lib")  
 #pragma comment(lib, "winmm.lib") 
 
 using namespace std;
@@ -120,25 +122,76 @@ void FindWnd()
 	}
 }
 
+bool IsSystemDarkMode() {
+	// Windows 10 1809版本及以上支持  
+	HKEY hKey;
+	DWORD darkMode = 0;
+	DWORD dataSize = sizeof(DWORD);
+
+	// 检测系统主题  
+	if (RegOpenKeyEx(HKEY_CURRENT_USER,
+		L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+		0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+
+		if (RegQueryValueEx(hKey, L"AppsUseLightTheme",
+			NULL, NULL, (LPBYTE)&darkMode, &dataSize) == ERROR_SUCCESS) {
+			RegCloseKey(hKey);
+			// 0 表示深色模式，1 表示浅色模式  
+			return darkMode == 0;
+		}
+
+		RegCloseKey(hKey);
+	}
+
+	return false; // 默认返回浅色模式  
+}
 
 void Binarylize(Mat& src) {
+	bool isDarkMode = IsSystemDarkMode();
 	Mat bin, edge;
 	cvtColor(src, bin, COLOR_BGR2GRAY);
 	inRange(bin, Scalar(128, 128, 128), Scalar(255, 255, 255), bin);
 
-	Canny(bin, edge, 80, 130);
+	Canny(bin, edge, 50, 150, 3);
+
 	int gridHeight = src.cols / 10.0;
 	int gridWidth = src.rows / 8.0;
 	int gridOffset = clock() / 1000 * 10;
+
+	Vec3b colorBright, colorDark, gridColor, edgeColor, frameColor;
+	if (isDarkMode) {
+		// 深色模式配色  
+		colorBright = Vec3b(25, 25, 25);
+		colorDark = Vec3b(182, 109, 93);
+		gridColor = Vec3b(50, 50, 50);
+		edgeColor = Vec3b(236, 138, 116);
+		frameColor = Vec3b(50, 50, 50);
+	}
+	else {
+		// 浅色模式配色  
+		colorBright = config::colorBright;
+		colorDark = config::colorDark;
+		gridColor = config::colorGrid;
+		edgeColor = config::colorEdge;
+		frameColor = config::colorFrame;
+	}
+
+	Mat dilatedEdge;
+	dilate(edge, dilatedEdge, Mat(), Point(-1, -1), 1);
+
 	for (int r = 0; r < src.rows; ++r) {
 		for (int c = 0; c < src.cols; ++c) {
-			src.at<Vec3b>(r, c) = ((bin.at<uchar>(r, c) == 255) ? config::colorBright : config::colorDark);
-			if(config::DrawGrid)
-				if (r % gridHeight == 0 || (c + gridOffset) % gridWidth == 0) src.at<Vec3b>(r, c) = config::colorGrid;
-			if (edge.at<uchar>(r, c) == 255) src.at<Vec3b>(r, c) = config::colorEdge;
+			src.at<Vec3b>(r, c) = ((bin.at<uchar>(r, c) == 255) ? colorBright : colorDark);
+
+			if (config::DrawGrid)
+				if (r % gridHeight == 0 || (c + gridOffset) % gridWidth == 0)
+					src.at<Vec3b>(r, c) = gridColor;
+
+			if (dilatedEdge.at<uchar>(r, c) == 255)
+				src.at<Vec3b>(r, c) = edgeColor;
 		}
 	}
-	rectangle(src, Rect{ 0,0,src.cols,src.rows }, config::colorFrame, 0.1);
+	rectangle(src, Rect{ 0,0,src.cols,src.rows }, frameColor, 0.1);
 }
 
 string FindVideo() {
@@ -212,8 +265,47 @@ void Play() {
 	return;
 }
 
+bool IsRunAsAdmin() {
+	HANDLE hToken = NULL;
+	if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+		TOKEN_ELEVATION elevation;
+		DWORD cbSize = sizeof(TOKEN_ELEVATION);
+		if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &cbSize)) {
+			CloseHandle(hToken);
+			return elevation.TokenIsElevated;
+		}
+		CloseHandle(hToken);
+	}
+	return false;
+}
+
+void RestartAsAdmin() {
+	TCHAR szPath[MAX_PATH];
+	if (GetModuleFileName(NULL, szPath, ARRAYSIZE(szPath))) {
+		SHELLEXECUTEINFO sei = { sizeof(sei) };
+		sei.lpVerb = L"runas";
+		sei.lpFile = szPath;
+		sei.hwnd = NULL;
+		sei.nShow = SW_NORMAL;
+
+		if (!ShellExecuteEx(&sei)) {
+			DWORD dwError = GetLastError();
+			if (dwError == ERROR_CANCELLED) {
+				MessageBox(NULL, L"需要管理员权限", L"提示", MB_OK);
+				exit(1);
+			}
+		}
+		exit(0);
+	}
+}
+
 int main() {
 	std::locale::global(std::locale("zh_CN.UTF-8"));
+
+	if (!IsRunAsAdmin()) {
+		RestartAsAdmin();
+	}
+
 	Play();
 	system("pause");
 	
